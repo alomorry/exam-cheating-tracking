@@ -1,0 +1,67 @@
+[
+  {
+    "time_sec": 26.22,
+    "event": "MULTIPLE_FACES",
+    "info": "2 лиц"
+  },
+  {
+    "time_sec": 27.02,
+    "event": "LOOKING_AWAY",
+    "info": "Длительность: 26.5 с"
+  },
+  {
+    "time_sec": 36.2,
+    "event": "MULTIPLE_FACES",
+    "info": "2 лиц"
+  },
+  {
+    "time_sec": 67.96,
+    "event": "LOOKING_AWAY",
+    "info": "Длительность: 32.4 с"
+  },
+  {
+    "time_sec": 69.75,
+    "event": "MULTIPLE_FACES",
+    "info": "2 лиц"
+  },
+  {
+    "time_sec": 77.77,
+    "event": "MULTIPLE_FACES",
+    "info": "2 лиц"
+  },
+  {
+    "time_sec": 81.18,
+    "event": "LOOKING_AWAY",
+    "info": "Длительность: 3.4 с"
+  },
+  {
+    "time_sec": 90.42,
+    "event": "LOOKING_AWAY",
+    "info": "Длительность: 6.8 с"
+  },
+  {
+    "time_sec": 110.09,
+    "event": "MULTIPLE_FACES",
+    "info": "2 лиц"
+  },
+  {
+    "time_sec": 123.06,
+    "event": "MULTIPLE_FACES",
+    "info": "2 лиц"
+  },
+  {
+    "time_sec": 137.32,
+    "event": "LOOKING_AWAY",
+    "info": "Длительность: 15.6 с"
+  },
+  {
+    "time_sec": 160.48,
+    "event": "MULTIPLE_FACES",
+    "info": "2 лиц"
+  },
+  {
+    "time_sec": 165.92,
+    "event": "LOOKING_AWAY",
+    "info": "Длительность: 27.8 с"
+  }
+]

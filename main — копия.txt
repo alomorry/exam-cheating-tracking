@@ -1,0 +1,263 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import time
+import json
+import os
+import socket
+
+
+SERVER_IP = "192.168.0.100"
+SERVER_PORT = 8080
+
+def send_to_server(data):
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((SERVER_IP, SERVER_PORT))
+        sock.send(json.dumps(data).encode('utf-8'))
+        sock.close()
+    except Exception as e:
+        print(f"Не удалось отправить на сервер: {e}")
+        pass  # Или логировать в локальный файл
+
+def log_event(event_type, ts, details=""):
+    entry = {"time_sec": round(ts, 2), "event": event_type, "info": details}
+    log_events.append(entry)
+    print(f"[{ts:.2f}s] {event_type}: {details}")
+    # Отправляем алерт на сервер
+    if event_type in ["LOOKING_AWAY", "MULTIPLE_FACES"]:  # Только важные события
+        send_to_server(entry)
+
+
+# Порог для определения поворота головы (в радианах)
+PITCH_THRESHOLD = 0.4  # Вверх/вниз
+YAW_THRESHOLD = 0.4    # Влево/вправо
+# Порог для отвода взгляда (разница между центром глаза и центром зрачка в долях от ширины глаза)
+EYE_LOOK_THRESHOLD = 0.2
+MAX_AWAY_DURATION = 3.0    # Максимальное время отсутствия в секундах
+LOG_FILE = "exam_events.json"
+MESH_CONNECTIONS = mp.solutions.face_mesh.FACEMESH_TESSELATION # Сетка лица
+MESH_IRIS = mp.solutions.face_mesh.FACEMESH_IRISES # Зрачки
+
+log_events = []
+def save_log():
+    with open(LOG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(log_events, f, indent=2, ensure_ascii=False)
+    print(f"\nЛог сохранён в '{LOG_FILE}'")
+
+def draw_chinese_text(img, text, position, font_size=20, color=(0, 0, 255)):
+    """Рисует русский текст на изображении OpenCV."""
+    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil)
+    font_path = None
+    if os.name == 'nt': 
+        font_path = 'arial.ttf' 
+        font_path = os.path.join('C:', 'Windows', 'Fonts', font_path)
+    else:
+        font_path = 'DejaVuSans.ttf'
+
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except (OSError, FileNotFoundError):
+        print(f"Предупреждение: Шрифт '{font_path}' не найден. Использую стандартный.")
+        font = ImageFont.load_default()
+
+    draw.text(position, text, font=font, fill=color)
+    img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    return img
+
+def estimate_head_pose(landmarks, image_shape):
+    """Оценивает поворот головы (pitch, yaw, roll) в градусах."""
+    h, w = image_shape[:2]
+    face_2d = []
+    face_3d = []
+    for idx in [1, 33, 263, 152, 50, 280]: # nose, left eye inner, right eye inner, chin, left mouth, right mouth
+        if idx < len(landmarks):
+            x = landmarks[idx].x
+            y = landmarks[idx].y
+            z = landmarks[idx].z # Используется для 3D
+            face_2d.append([x * w, y * h])
+            face_3d.append([x * w, y * h, z * w]) # Умножаем z на w для масштабирования
+
+    if len(face_2d) < 4:
+        return None, None, None
+
+    face_2d = np.array(face_2d, dtype=np.float64)
+    face_3d = np.array(face_3d, dtype=np.float64)
+
+    # Камера (приблизительно для 640x480)
+    focal_length = 1 * w
+    cam_matrix = np.array([[focal_length, 0, w / 2],
+                           [0, focal_length, h / 2],
+                           [0, 0, 1]])
+
+    # Дисторшн
+    dist_matrix = np.zeros((4, 1))
+
+    # Решение PnP
+    success, rotation_vec, translation_vec = cv2.solvePnP(
+        face_3d, face_2d, cam_matrix, dist_matrix
+    )
+
+    if not success:
+        return None, None, None
+
+    # Углы поворота
+    rotation_matrix, _ = cv2.Rodrigues(rotation_vec)
+    angles, *_ = cv2.RQDecomp3x3(rotation_matrix)
+
+    # Углы в радианах
+    pitch = angles[0]
+    yaw = angles[1]
+    roll = angles[2]
+
+    return pitch, yaw, roll
+
+def estimate_gaze_direction(landmarks, image_shape):
+    """Оценивает приблизительное направление взгляда."""
+    h, w = image_shape[:2]
+    # Индексы зрачков: 468 (левый), 469 (правый)
+    try:
+        # Внутренние и внешние углы глаз
+        left_eye_inner = landmarks[33]
+        left_eye_outer = landmarks[133]
+        right_eye_inner = landmarks[362]
+        right_eye_outer = landmarks[263]
+
+        # Центры глаз
+        left_eye_center_x = (left_eye_inner.x + left_eye_outer.x) / 2
+        right_eye_center_x = (right_eye_inner.x + right_eye_outer.x) / 2
+        eye_center_x = (left_eye_center_x + right_eye_center_x) / 2
+
+        # Приблизительный центр лица (нос)
+        nose_x = landmarks[1].x
+
+        # Смещение центра глаз от носа
+        offset = eye_center_x - nose_x
+        eye_width = abs(left_eye_outer.x - left_eye_inner.x)
+        if eye_width > 0.01:
+            normalized_offset = offset / eye_width
+            return abs(normalized_offset) > EYE_LOOK_THRESHOLD
+    except (IndexError, AttributeError):
+        pass
+
+    return False
+
+def main():
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Ошибка: веб-камера не найдена.")
+        return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    start_time = time.time()
+    last_away_time = None
+    multi_face_warned = False
+
+    mp_face_mesh = mp.solutions.face_mesh
+    mp_face_detection = mp.solutions.face_detection
+
+    with mp_face_mesh.FaceMesh(
+        max_num_faces=2,
+        refine_landmarks=True, 
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    ) as face_mesh, mp_face_detection.FaceDetection(
+        min_detection_confidence=0.6
+    ) as face_detector:
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            mesh_results = face_mesh.process(rgb)
+            detect_results = face_detector.process(rgb)
+
+            elapsed = time.time() - start_time
+
+            #Проверка количества лиц
+            face_count = len(detect_results.detections) if detect_results.detections else 0
+            if face_count == 0:
+                frame = draw_chinese_text(frame, "Лицо не найдено", (10, 30), font_size=18, color=(0, 0, 255))
+            elif face_count > 1:
+                frame = draw_chinese_text(frame, "ВНИМАНИЕ: >1 лица!", (10, 30), font_size=18, color=(0, 0, 255))
+                if not multi_face_warned:
+                    log_event("MULTIPLE_FACES", elapsed, f"Обнаружено лиц: {face_count}")
+                    multi_face_warned = True
+            else:
+                multi_face_warned = False
+
+            looking_away = False
+            head_turned = False
+            eye_look_away = False
+
+            if mesh_results.multi_face_landmarks:
+                landmarks = mesh_results.multi_face_landmarks[0].landmark
+
+                #Рисуем сетку лица
+                ih, iw, ic = frame.shape
+                annotated_frame = frame.copy()
+                for connection in MESH_CONNECTIONS:
+                    start_idx = connection[0]
+                    end_idx = connection[1]
+                    if start_idx < len(landmarks) and end_idx < len(landmarks):
+                        start_point = (int(landmarks[start_idx].x * iw), int(landmarks[start_idx].y * ih))
+                        end_point = (int(landmarks[end_idx].x * iw), int(landmarks[end_idx].y * ih))
+                        cv2.line(annotated_frame, start_point, end_point, (0, 255, 0), 1)
+                frame = annotated_frame
+
+                # --- Оценка поворота головы ---
+                pitch, yaw, roll = estimate_head_pose(landmarks, frame.shape)
+                if pitch is not None and yaw is not None:
+                    if abs(pitch) > PITCH_THRESHOLD or abs(yaw) > YAW_THRESHOLD:
+                        head_turned = True
+                        looking_away = True
+
+                # --- Оценка отвода взгляда ---
+                if estimate_gaze_direction(landmarks, frame.shape):
+                    eye_look_away = True
+                    looking_away = True
+
+            # --- Визуализация нарушений ---
+            status_messages = []
+            if looking_away:
+                if last_away_time is None:
+                    last_away_time = elapsed
+                elif elapsed - last_away_time > MAX_AWAY_DURATION:
+                    status_messages.append("отвод взгляда!")
+                    log_event("отвод взгляда", elapsed, f"Длительность: {elapsed - last_away_time:.1f} с")
+                    last_away_time = elapsed
+            else:
+                last_away_time = None
+
+            if head_turned:
+                status_messages.append("Поворот головы в сторону/вверх/вниз")
+            if eye_look_away:
+                status_messages.append("Отвод взгляда (оценка по глазам)")
+
+            y_offset = 60
+            for msg in status_messages:
+                frame = draw_chinese_text(frame, msg, (10, y_offset), font_size=18, color=(0, 69, 255))
+                y_offset += 25
+
+            # --- Время ---
+            frame = draw_chinese_text(frame, f"Время: {elapsed:.1f} с", (10, 450), font_size=16, color=(255, 255, 255))
+
+            cv2.imshow('Система контроля списывания (ESC — выход)', frame)
+
+            if cv2.waitKey(1) == 27:  # ESC
+                break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    save_log()
+
+if __name__ == "__main__":
+    main()
